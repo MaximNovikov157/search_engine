@@ -44,12 +44,9 @@ public class SearchService {
 
         logger.info("Поиск начат с запросом: '{}', сайт: '{}', смещение: {}, лимит: {}",
                     query, sites.stream().map(Site::getUrl).collect(Collectors.joining(", ", "[", "]")), offset, limit);
-        /*
         if (!areSitesIndexed(sites)) {
             throw new SearchException("Указанные сайты не были полностью проиндексированы");
         }
-        */
-
         Set<String> parsedLemmas = parseQueryLemmas(query);
         Map<Page, Double> pageRank = calculatePageRank(parsedLemmas, sites);
         logger.info("Ранжирование страниц выполнено. Всего страниц: {}", pageRank.size());
