@@ -1,0 +1,23 @@
+server:
+  port: 8080
+spring:
+  datasource:
+    username: root
+    password: 2Ab-2Ab-2Ab-
+    url: jdbc:mysql://localhost:3306/search_engine?useSSL=false&requireSSL=false&allowPublicKeyRetrieval=true
+  jpa:
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.MySQL8Dialect
+        hibernate.format_sql: true
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+indexing-settings:
+  sites:
+    - url: https://www.playback.ru
+      name: PlayBack.Ru
+    - url: https://volochek.life
+      name: VOLOCHEK.LIFE
+  user-agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36"
+  referrer: http://www.google.com
