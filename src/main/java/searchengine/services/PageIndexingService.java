@@ -2,7 +2,6 @@ package searchengine.services;
 
 import lombok.RequiredArgsConstructor;
 import org.jsoup.UnsupportedMimeTypeException;
-import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
 import org.jsoup.select.Elements;
 import org.slf4j.Logger;
@@ -17,12 +16,9 @@ import searchengine.model.Site;
 import searchengine.model.Status;
 import searchengine.repositories.PageRepository;
 import searchengine.repositories.SiteRepository;
-import java.io.IOException;
 import java.time.LocalDateTime;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.ForkJoinTask;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -37,7 +33,9 @@ public class PageIndexingService {
     private final LemmaParserService lemmaParserService;
     private final HtmlParserService htmlParserService;
     private final SitesList sitesList;
+
     private final AtomicBoolean stopRequested = new AtomicBoolean(false);
+
     private static final Logger logger = LoggerFactory.getLogger(PageIndexingService.class);
 
     public IndexApiResponse indexPage(String url) {
@@ -46,77 +44,100 @@ public class PageIndexingService {
             if (sitesRepository.count() == 0) {
                 databaseHelperService.populateDatabaseFromConfig(sitesList);
             }
+
             Site site = sitesRepository.findByUrlStartingWith(url);
             if (site == null) {
                 return new IndexApiResponse(false, "Данная страница находится за пределами сайтов, указанных в конфигурации");
             }
+
             Optional<Page> existingPage = pageRepository.findBySiteAndPath(site, url);
             existingPage.ifPresent(databaseHelperService::deletePageData);
 
-            processPage(site, url, false);
+            processPageIteratively(site, url, false);
             return new IndexApiResponse(true, null);
         } catch (Exception e) {
             return new IndexApiResponse(false, "Ошибка индексации страницы: " + e.getMessage());
         }
     }
 
-    private void processPage(Site site, String url, boolean processAllPages) {
-        try {
+    private void processPageIteratively(Site site, String startUrl, boolean processAllLinks) {
+        Set<String> processedUrls = ConcurrentHashMap.newKeySet();
+        Deque<String> urlStack = new ArrayDeque<>();
+        urlStack.push(startUrl);
+
+        while (!urlStack.isEmpty() && !stopRequested.get()) {
             if (stopRequested.get()) {
-                logger.warn("Остановка индексации: {}", url);
-                return;
-            }
-            if (pageRepository.existsBySiteAndPath(site, htmlParserService.getPath(url))) {
-                return;
-            }
-            logger.info("Обрабатываю страницу: " + url + " в потоке: " + Thread.currentThread().getName());
-            PageFetchResult fetchResult = htmlParserService.fetchDocumentWithStatus(url);
-
-            if (stopRequested.get()) {
-                logger.info("Индексация остановлена для сайта {}", site.getUrl());
+                logger.info("Индексация остановлена для сайта: {}", site.getUrl());
                 return;
             }
 
-            if (fetchResult.getStatusCode() >= 400) {
-                throw new IOException("Ошибка HTTP: " + fetchResult.getStatusCode());
+            String currentUrl = urlStack.pop();
+
+            if (!processedUrls.add(currentUrl)) {
+                logger.info("Страница {} уже обработана, пропускаю.", currentUrl);
+                continue;
             }
 
-            Page page = databaseHelperService.savePage(site, htmlParserService.getPath(url), fetchResult.getStatusCode(), fetchResult.getDocument().html());
-            String cleanContent = htmlParserService.cleanHtml(fetchResult.getDocument().html());
+            try {
+                logger.info("Обрабатываю страницу: " + currentUrl + " в потоке: " + Thread.currentThread().getName());
 
-            Map<String, Integer> lemmaCounts = lemmaParserService.parseLemmas(cleanContent);
+                PageFetchResult fetchResult = htmlParserService.fetchDocumentWithStatus(currentUrl);
 
-            databaseHelperService.updateLemmaAndIndex(site, page, lemmaCounts);
-
-            logger.info("Страница {} успешно проиндексирована", url);
-
-            if (processAllPages) {
-                if (stopRequested.get()) {
-                    return;
+                if (fetchResult.getStatusCode() >= 400) {
+                    logger.warn("HTTP ошибка {} для {}", fetchResult.getStatusCode(), currentUrl);
+                    continue;
                 }
-                processLinks(site, fetchResult.getDocument());
+
+                Page page = databaseHelperService.savePage(
+                        site,
+                        htmlParserService.getPath(currentUrl),
+                        fetchResult.getStatusCode(),
+                        fetchResult.getDocument().html()
+                );
+
+                String cleanContent = htmlParserService.cleanHtml(fetchResult.getDocument().html());
+                Map<String, Integer> lemmaCounts = lemmaParserService.parseLemmas(cleanContent);
+                databaseHelperService.updateLemmaAndIndex(site, page, lemmaCounts);
+
+                logger.info("Страница {} успешно проиндексирована", currentUrl);
+
+                if (stopRequested.get()) {
+                    logger.info("Остановка индексации после обработки страницы: {}", currentUrl);
+                    break;
+                }
+
+                if (processAllLinks) {
+                    Elements links = fetchResult.getDocument().select("a[href]");
+                    for (Element link : links) {
+                        if (stopRequested.get()) {
+                            logger.info("Остановка индексации при обработке ссылок страницы: {}", currentUrl);
+                            return;
+                        }
+                        String linkHref = link.absUrl("href");
+                        if (linkHref.startsWith(site.getUrl()) && !processedUrls.contains(linkHref)) {
+                            urlStack.push(linkHref);
+                        }
+                    }
+                }
+
+            } catch (UnsupportedMimeTypeException e) {
+                logger.warn("UnsupportedMimeTypeException для {}: {}", currentUrl, e.getMimeType());
+            } catch (Exception e) {
+                logger.error("Ошибка при обработке страницы {}", currentUrl, e);
             }
-        } catch (UnsupportedMimeTypeException e) {
-            logger.warn("UnsupportedMimeTypeException", e);
-        } catch (Exception e) {
-            logger.error("Ошибка при обработке страницы: {}", url, e);
+        }
+
+        if (stopRequested.get()) {
+            logger.info("Индексация остановлена для сайта {}", site.getUrl());
         }
     }
 
-    private void processLinks(Site site, Document doc) {
-        Elements links = doc.select("a[href]");
-        for (Element link : links) {
-            String linkHref = link.absUrl("href");
-            if (stopRequested.get()) {
-                return;
-            }
-            if (linkHref.startsWith(site.getUrl())) {
-                processPage(site, linkHref, true);
-            }
-        }
-    }
 
     public IndexApiResponse startIndexing() {
+        if (existsIndexingSite()) {
+            logger.info("Индексация уже запущена.");
+            return new IndexApiResponse(false, "Индексация уже запущена.");
+        }
         stopRequested.set(false);
         if (stopRequested.get()) {
             return new IndexApiResponse(false, "Индексация уже остановлена.");
@@ -126,24 +147,28 @@ public class PageIndexingService {
         if (siteConfigs == null) {
             return new IndexApiResponse(false, "Отсутствуют сайты в конфигурационном файле.");
         }
-        ForkJoinPool forkJoinPool = new ForkJoinPool();
-        List<ForkJoinTask<?>> tasks = new ArrayList<>();
-        for (SiteConfig siteConfig : siteConfigs) {
-            Site site = sitesRepository.findByUrlStartingWith(siteConfig.getUrl());
-            if (site != null) {
-                databaseHelperService.deleteOldSiteData(site);
-            }
 
+        databaseHelperService.deleteOldSitesData();
+
+        ForkJoinPool forkJoinPool = new ForkJoinPool(4);
+        List<ForkJoinTask<?>> tasks = new ArrayList<>();
+
+        for (SiteConfig siteConfig : siteConfigs) {
             Site newSite = databaseHelperService.saveSite(
                     siteConfig,
                     Status.INDEXING,
                     LocalDateTime.now()
             );
-            ForkJoinTask<?> task = forkJoinPool.submit(() -> processPage(newSite, siteConfig.getUrl(), true));
+
+            ForkJoinTask<?> task = forkJoinPool.submit(() -> processPageIteratively(newSite, siteConfig.getUrl(), true));
             tasks.add(task);
         }
+
         for (ForkJoinTask<?> task : tasks) {
-            if (!stopRequested.get()) {
+            if (stopRequested.get()) {
+                logger.info("Прерываю выполнение задачи");
+                task.cancel(true);
+            } else {
                 task.join();
             }
         }
@@ -168,7 +193,6 @@ public class PageIndexingService {
         return new IndexApiResponse(true, null);
     }
 
-
     public IndexApiResponse stopIndexing() {
         List<Site> indexingSites = sitesRepository.findByStatus(Status.INDEXING);
         if (indexingSites.isEmpty()) {
@@ -182,5 +206,9 @@ public class PageIndexingService {
             sitesRepository.save(site);
         }
         return new IndexApiResponse(true, "Индексация остановлена.");
+    }
+
+    private boolean existsIndexingSite() {
+        return sitesRepository.existsByStatus(Status.INDEXING);
     }
 }

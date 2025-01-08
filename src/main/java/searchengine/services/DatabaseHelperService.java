@@ -27,11 +27,11 @@ public class DatabaseHelperService {
     private static final Logger logger = LoggerFactory.getLogger(PageIndexingService.class);
 
     @Transactional
-    public void deleteOldSiteData(Site site) {
-        pageRepository.deleteBySite(site);
-        lemmaRepository.deleteBySite(site);
-        indexRepository.deleteByLemmaSite(site);
-        siteRepository.delete(site);
+    public void deleteOldSitesData() {
+        indexRepository.deleteAllInBatch();
+        lemmaRepository.deleteAllInBatch();
+        pageRepository.deleteAllInBatch();
+        siteRepository.deleteAllInBatch();
     }
 
     @Transactional
@@ -123,4 +123,5 @@ public class DatabaseHelperService {
         siteRepository.save(newSite);
         return newSite;
     }
+
 }
